@@ -1,0 +1,17 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // users: frontend পড়তে পারবে, লিখতে পারবে না (শুধু server)
+    match /users/{userId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // payments: যে কেউ নতুন payment create করতে পারবে
+    match /payments/{txId} {
+      allow create: if true;
+      allow read, update, delete: if false;
+    }
+  }
+}
