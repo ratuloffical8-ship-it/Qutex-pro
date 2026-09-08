@@ -4,7 +4,7 @@ import { doc, onSnapshot } from 'firebase/firestore'
 import PaymentPage from './PaymentPage'
 import RulesPage from './RulesPage'
 import { forexMarkets, runSignalEngine, MIN_CANDLES } from './signalEngine'
-import { predictNextCandle } from './geminiEngine'
+import { predictNextCandles } from './geminiEngine'
 import GhostCandleChart from './GhostCandleChart'
 
 // ── Telegram WebApp ───────────────────────────────────────────
@@ -119,9 +119,9 @@ export default function App() {
   const [geminiKey, setGeminiKey] = useState(localStorage.getItem('gemini_api_key') || '')
   const [geminiKeyInput, setGeminiKeyInput] = useState('')
 
-  // ── AI ghost-candle prediction ──────────────────────────────
-  const [chartCandles, setChartCandles] = useState([])       // real candles, kept just for the chart
-  const [predictedCandle, setPredictedCandle] = useState(null) // {open,high,low,close}
+  // ── AI ghost-candle prediction (2 chained candles) ──────────
+  const [chartCandles, setChartCandles] = useState([])          // real candles, kept just for the chart
+  const [predictedCandles, setPredictedCandles] = useState(null) // [candle1, candle2] or null
   const [predictedReason, setPredictedReason] = useState('')
   const [predicting, setPredicting] = useState(false)
 
@@ -307,7 +307,7 @@ export default function App() {
 
     setScanning(true)
     setConnStatus('ডেটা আনা হচ্ছে...')
-    setPredictedCandle(null)
+    setPredictedCandles(null)
     setPredictedReason('')
 
     try {
@@ -321,19 +321,19 @@ export default function App() {
       const result = runSignalEngine(candles)
       setChartCandles(candles)
 
-      // ── Ask Gemini for the next candle's exact O/H/L/C ────────
+      // ── Ask Gemini for the next TWO candles' exact O/H/L/C ────
       setConnStatus('Gemini বিশ্লেষণ করছে...')
       setPredicting(true)
-      const prediction = await predictNextCandle(geminiKey, selected.name, candles, result)
+      const prediction = await predictNextCandles(geminiKey, selected.name, candles, result)
       setPredicting(false)
 
-      setPredictedCandle({ open: prediction.open, high: prediction.high, low: prediction.low, close: prediction.close })
+      setPredictedCandles([prediction.candle1, prediction.candle2])
       setPredictedReason(prediction.reason)
 
-      // Final direction now comes from the predicted candle itself
-      // (close vs its own open) — this is what fixes the old "null when
-      // sideways" gate: a predicted candle always has SOME direction.
-      const finalDir = prediction.close > prediction.open ? 'CALL' : 'PUT'
+      // Final direction/scoring comes from candle 1 only (the immediate
+      // next minute — what a 60s trade actually resolves against).
+      // Candle 2 is shown as a look-ahead extra, not scored.
+      const finalDir = prediction.candle1.close > prediction.candle1.open ? 'CALL' : 'PUT'
       const finalConfidence = prediction.ok
         ? Math.round((result.confidence + prediction.confidence) / 2)
         : result.confidence
@@ -397,8 +397,8 @@ export default function App() {
       setLastPred(null)
       // Keep breakdown visible — only clear direction/confidence, not the indicator readout
       setSigData(prev => ({ direction: null, strength: prev.strength, breakdown: prev.breakdown, confidence: prev.confidence }))
-      // Ghost candle has now become a real, resolved candle — clear it
-      setPredictedCandle(null)
+      // Ghost candles have now become real, resolved candles — clear them
+      setPredictedCandles(null)
       setPredictedReason('')
     } catch (e) {
       console.error('checkResult error:', e)
@@ -520,19 +520,22 @@ export default function App() {
         />
       </div>
 
-      {/* ── AI GHOST-CANDLE PREDICTION ──
+      {/* ── AI GHOST-CANDLE PREDICTION (2 chained candles) ──
           Custom-rendered chart (not the TradingView iframe — iframes can't
-          be drawn on top of) showing the real recent candles plus one
-          translucent-gold "predicted" candle from Gemini. */}
+          be drawn on top of) showing the real recent candles plus two
+          direction-colored "predicted" candles from Gemini (white=UP,
+          gold=DOWN). Uses TwelveData, same source as the indicator engine —
+          it will not pixel-match the TradingView chart above (different
+          data vendor), by your own choice to keep TradingView as-is. */}
       <div style={{ padding: '10px 12px 0' }}>
         <div style={{ background: C.card, borderRadius: 12, padding: 10, border: `1px solid ${C.border}` }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
             <span style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-              🔮 AI প্রেডিক্টেড পরবর্তী ক্যান্ডেল
+              🔮 AI প্রেডিক্টেড পরবর্তী ২ ক্যান্ডেল
             </span>
             {predicting && <span style={{ fontSize: 10, color: C.gold }}>⟳ Gemini ভাবছে...</span>}
           </div>
-          <GhostCandleChart candles={chartCandles} predicted={predictedCandle} height={200} />
+          <GhostCandleChart candles={chartCandles} predicted={predictedCandles} height={200} />
           {predictedReason && (
             <div style={{ marginTop: 8, fontSize: 11, color: '#aaa', lineHeight: 1.5, textAlign: 'center' }}>
               {predictedReason}
@@ -800,4 +803,4 @@ export default function App() {
 
     </div>
   )
-}
+    }
