@@ -12,14 +12,17 @@ const C = {
   grid: '#1a1f2e',
   green: '#0ecb81',
   red: '#f6465d',
-  ghostUp: 'rgba(243, 186, 47, 0.35)',   // translucent gold — visually distinct from real candles
-  ghostDown: 'rgba(243, 186, 47, 0.35)',
-  ghostBorder: '#f3ba2f',
+  // Ghost candle colors are now direction-based, not a flat gold:
+  // UP/bullish prediction -> white, DOWN/bearish prediction -> gold.
+  ghostUpFill: 'rgba(255, 255, 255, 0.45)',
+  ghostUpBorder: '#ffffff',
+  ghostDownFill: 'rgba(243, 186, 47, 0.45)',
+  ghostDownBorder: '#f3ba2f',
 }
 
 // TwelveData "YYYY-MM-DD HH:mm:ss" -> unix seconds. Relative spacing between
 // candles is correct regardless of which timezone TwelveData used, since
-// every candle (and the +60s ghost candle) is parsed the same way.
+// every candle (and the ghost candles after it) is parsed the same way.
 const toUnixSeconds = (datetime) => {
   const iso = datetime.replace(' ', 'T') + 'Z'
   return Math.floor(new Date(iso).getTime() / 1000)
@@ -27,7 +30,8 @@ const toUnixSeconds = (datetime) => {
 
 /**
  * @param {Array} candles - chronological real candles: [{open,high,low,close,datetime}, ...]
- * @param {{open:number,high:number,low:number,close:number}|null} predicted - the Gemini ghost candle
+ * @param {Array<{open:number,high:number,low:number,close:number}>|null} predicted
+ *        - one or two Gemini ghost candles, chained in order (predicted[0] = next minute, predicted[1] = minute after)
  * @param {number} height - chart height in px
  */
 export default function GhostCandleChart({ candles, predicted, height = 220 }) {
@@ -78,27 +82,28 @@ export default function GhostCandleChart({ candles, predicted, height = 220 }) {
 
     realSeries.setData(realData)
 
-    // Ghost (predicted) candle — separate series, same price scale, styled
-    // translucent gold so it reads as "prediction" rather than real data.
-    if (predicted && realData.length > 0) {
-      const ghostSeries = chart.addCandlestickSeries({
-        upColor: C.ghostUp,
-        downColor: C.ghostDown,
-        borderUpColor: C.ghostBorder,
-        borderDownColor: C.ghostBorder,
-        wickUpColor: C.ghostBorder,
-        wickDownColor: C.ghostBorder,
-        priceLineVisible: false,
-        lastValueVisible: false,
+    // Ghost (predicted) candles — each gets its OWN series so each can be
+    // colored independently by its own direction (white=UP, gold=DOWN),
+    // rather than sharing one flat color regardless of direction.
+    if (predicted && predicted.length > 0 && realData.length > 0) {
+      const lastRealTime = realData[realData.length - 1].time
+      predicted.forEach((p, i) => {
+        if (!p) return
+        const isUp = p.close >= p.open
+        const ghostSeries = chart.addCandlestickSeries({
+          upColor: C.ghostUpFill,
+          downColor: C.ghostDownFill,
+          borderUpColor: C.ghostUpBorder,
+          borderDownColor: C.ghostDownBorder,
+          wickUpColor: C.ghostUpBorder,
+          wickDownColor: C.ghostDownBorder,
+          priceLineVisible: i === predicted.length - 1, // only the last ghost candle shows the price line
+          lastValueVisible: i === predicted.length - 1,
+        })
+        const ghostTime = lastRealTime + 60 * (i + 1) // +1 min, +2 min, ...
+        ghostSeries.setData([{ time: ghostTime, open: p.open, high: p.high, low: p.low, close: p.close }])
+        void isUp // color already encodes direction via up/down series options
       })
-      const ghostTime = realData[realData.length - 1].time + 60 // next 1-minute candle
-      ghostSeries.setData([{
-        time: ghostTime,
-        open: predicted.open,
-        high: predicted.high,
-        low: predicted.low,
-        close: predicted.close,
-      }])
     }
 
     chart.timeScale().fitContent()
@@ -130,12 +135,18 @@ export default function GhostCandleChart({ candles, predicted, height = 220 }) {
   return (
     <div>
       <div ref={containerRef} style={{ width: '100%', borderRadius: 10, overflow: 'hidden' }} />
-      {predicted && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, fontSize: 9.5, color: '#666' }}>
-          <span style={{ width: 10, height: 10, borderRadius: 2, background: C.ghostUp, border: `1px solid ${C.ghostBorder}` }} />
-          <span>স্বচ্ছ সোনালী = AI প্রেডিক্টেড পরবর্তী ক্যান্ডেল (আসল না)</span>
+      {predicted && predicted.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 6, fontSize: 9.5, color: '#666', flexWrap: 'wrap' }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 2, background: C.ghostUpFill, border: `1px solid ${C.ghostUpBorder}` }} />
+            সাদা = AI প্রেডিক্টেড UP ক্যান্ডেল
+          </span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 2, background: C.ghostDownFill, border: `1px solid ${C.ghostDownBorder}` }} />
+            গোল্ডেন = AI প্রেডিক্টেড DOWN ক্যান্ডেল
+          </span>
         </div>
       )}
     </div>
   )
-                    }
+      }
