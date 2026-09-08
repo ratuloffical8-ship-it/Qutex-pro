@@ -4,6 +4,8 @@ import { doc, onSnapshot } from 'firebase/firestore'
 import PaymentPage from './PaymentPage'
 import RulesPage from './RulesPage'
 import { forexMarkets, runSignalEngine, MIN_CANDLES } from './signalEngine'
+import { predictNextCandle } from './geminiEngine'
+import GhostCandleChart from './GhostCandleChart'
 
 // ── Telegram WebApp ───────────────────────────────────────────
 const tg = window.Telegram?.WebApp
@@ -112,6 +114,16 @@ export default function App() {
   const [keySavedDate, setKeySavedDate] = useState(localStorage.getItem('td_key_saved_date') || null)
   const [usage, setUsage] = useState(getStoredUsage())
   const [planLimit, setPlanLimit] = useState(DAILY_LIMIT_FALLBACK)
+
+  // ── Gemini API key state ────────────────────────────────────
+  const [geminiKey, setGeminiKey] = useState(localStorage.getItem('gemini_api_key') || '')
+  const [geminiKeyInput, setGeminiKeyInput] = useState('')
+
+  // ── AI ghost-candle prediction ──────────────────────────────
+  const [chartCandles, setChartCandles] = useState([])       // real candles, kept just for the chart
+  const [predictedCandle, setPredictedCandle] = useState(null) // {open,high,low,close}
+  const [predictedReason, setPredictedReason] = useState('')
+  const [predicting, setPredicting] = useState(false)
 
   // ── Trading ───────────────────────────────────────────────────
   const [selected, setSelected] = useState(forexMarkets[0])
@@ -232,6 +244,21 @@ export default function App() {
     setConnStatus('API KEY লাগবে')
   }
 
+  // ── Gemini key save/delete ────────────────────────────────────
+  const handleSaveGeminiKey = () => {
+    const trimmed = geminiKeyInput.trim()
+    if (!trimmed) return
+    localStorage.setItem('gemini_api_key', trimmed)
+    setGeminiKey(trimmed)
+    setGeminiKeyInput('')
+  }
+
+  const handleDeleteGeminiKey = () => {
+    if (!window.confirm('Gemini API key মুছে ফেলবেন?')) return
+    localStorage.removeItem('gemini_api_key')
+    setGeminiKey('')
+  }
+
   const daysUsingKey = keySavedDate
     ? Math.max(0, Math.floor((Date.now() - new Date(keySavedDate)) / 86400000))
     : null
@@ -280,6 +307,8 @@ export default function App() {
 
     setScanning(true)
     setConnStatus('ডেটা আনা হচ্ছে...')
+    setPredictedCandle(null)
+    setPredictedReason('')
 
     try {
       const candles = await fetchCandles(selected.td)
@@ -290,28 +319,46 @@ export default function App() {
       }
 
       const result = runSignalEngine(candles)
-      setSigData(result)
+      setChartCandles(candles)
+
+      // ── Ask Gemini for the next candle's exact O/H/L/C ────────
+      setConnStatus('Gemini বিশ্লেষণ করছে...')
+      setPredicting(true)
+      const prediction = await predictNextCandle(geminiKey, selected.name, candles, result)
+      setPredicting(false)
+
+      setPredictedCandle({ open: prediction.open, high: prediction.high, low: prediction.low, close: prediction.close })
+      setPredictedReason(prediction.reason)
+
+      // Final direction now comes from the predicted candle itself
+      // (close vs its own open) — this is what fixes the old "null when
+      // sideways" gate: a predicted candle always has SOME direction.
+      const finalDir = prediction.close > prediction.open ? 'CALL' : 'PUT'
+      const finalConfidence = prediction.ok
+        ? Math.round((result.confidence + prediction.confidence) / 2)
+        : result.confidence
+
+      setSigData({ ...result, direction: finalDir, confidence: finalConfidence })
       setConnStatus('CONNECTED ✅')
 
       // Count this generation against the free daily quota (premium = unlimited)
       if (!isPremium) setFreeUsage(bumpFreeUsage())
 
-      if (result.direction) {
-        setLastPred(result.direction)
-        try { new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg').play() } catch (_) {}
+      setLastPred(finalDir)
+      try { new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg').play() } catch (_) {}
 
-        // Schedule exactly ONE follow-up check after the trade duration —
-        // this costs 1 extra API call, not a repeating poll.
-        if (resultTimerRef.current) clearTimeout(resultTimerRef.current)
-        resultTimerRef.current = setTimeout(() => { checkResult(result.direction) }, (TRADE_SECONDS + 5) * 1000)
-      }
+      // Schedule exactly ONE follow-up check after the trade duration —
+      // this costs 1 extra API call, not a repeating poll.
+      if (resultTimerRef.current) clearTimeout(resultTimerRef.current)
+      resultTimerRef.current = setTimeout(() => { checkResult(finalDir) }, (TRADE_SECONDS + 5) * 1000)
     } catch (e) {
       console.error(e)
       setConnStatus(/invalid api key/i.test(e.message) ? 'API KEY ভুল ❌' : 'ERROR ❌')
+      setPredicting(false)
     } finally {
       setScanning(false)
     }
-  }, [apiKey, selected, isLocked, usage, planLimit, fetchCandles, isPremium]) // eslint-disable-line
+  }, [apiKey, geminiKey, selected, isLocked, usage, planLimit, fetchCandles, isPremium]) // eslint-disable-line
 
   // ── Result check (single follow-up call, not polling) ──────
   const checkResult = useCallback(async (predDirection) => {
@@ -350,6 +397,9 @@ export default function App() {
       setLastPred(null)
       // Keep breakdown visible — only clear direction/confidence, not the indicator readout
       setSigData(prev => ({ direction: null, strength: prev.strength, breakdown: prev.breakdown, confidence: prev.confidence }))
+      // Ghost candle has now become a real, resolved candle — clear it
+      setPredictedCandle(null)
+      setPredictedReason('')
     } catch (e) {
       console.error('checkResult error:', e)
     }
@@ -468,6 +518,27 @@ export default function App() {
           width="100%" height="100%" style={{ border: 'none', display: 'block' }}
           title="chart"
         />
+      </div>
+
+      {/* ── AI GHOST-CANDLE PREDICTION ──
+          Custom-rendered chart (not the TradingView iframe — iframes can't
+          be drawn on top of) showing the real recent candles plus one
+          translucent-gold "predicted" candle from Gemini. */}
+      <div style={{ padding: '10px 12px 0' }}>
+        <div style={{ background: C.card, borderRadius: 12, padding: 10, border: `1px solid ${C.border}` }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <span style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+              🔮 AI প্রেডিক্টেড পরবর্তী ক্যান্ডেল
+            </span>
+            {predicting && <span style={{ fontSize: 10, color: C.gold }}>⟳ Gemini ভাবছে...</span>}
+          </div>
+          <GhostCandleChart candles={chartCandles} predicted={predictedCandle} height={200} />
+          {predictedReason && (
+            <div style={{ marginTop: 8, fontSize: 11, color: '#aaa', lineHeight: 1.5, textAlign: 'center' }}>
+              {predictedReason}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* ── SCORE ROW ── */}
@@ -654,7 +725,7 @@ export default function App() {
                   ফ্রি প্ল্যান: দৈনিক ৮০০ কল, মিনিটে ৮টা। আপনার key শুধু এই ডিভাইসে সেভ থাকে — আমাদের সার্ভারে পাঠানো হয় না।
                 </div>
 
-                <div style={{ background: '#0d1117', borderRadius: 10, padding: '12px 14px', border: `1px solid ${C.border}` }}>
+                <div style={{ background: '#0d1117', borderRadius: 10, padding: '12px 14px', border: `1px solid ${C.border}`, marginBottom: 14 }}>
                   <div style={{ fontSize: 10, color: '#666', marginBottom: 6 }}>📊 Daily API Usage</div>
                   <div style={{ fontSize: 16, fontWeight: 800, color: usagePct >= 90 ? C.red : C.green, marginBottom: 6 }}>
                     {usage.count} / {planLimit}
@@ -663,6 +734,44 @@ export default function App() {
                     <div style={{ width: `${usagePct}%`, height: '100%', background: usagePct >= 90 ? C.red : C.gold, transition: 'width 0.3s' }} />
                   </div>
                   <div style={{ fontSize: 9, color: '#555', marginTop: 4 }}>Resets at local midnight</div>
+                </div>
+
+                {/* ── Gemini API Key ── */}
+                <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 10 }}>
+                  🔮 Gemini API Key (AI প্রেডিকশনের জন্য)
+                </div>
+
+                {geminiKey ? (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                      <span style={{ color: C.green, fontSize: 12, fontWeight: 700 }}>
+                        ✅ Key saved (...{geminiKey.slice(-6)})
+                      </span>
+                      <button onClick={handleDeleteGeminiKey} style={{
+                        padding: '4px 10px', borderRadius: 6, background: 'transparent',
+                        border: `1px solid ${C.red}`, color: C.red, fontSize: 10, cursor: 'pointer',
+                      }}>🗑️ Delete</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ color: C.muted, fontSize: 11, marginBottom: 10 }}>
+                    কোনো key সেভ করা নেই — ছাড়া শুধু ইন্ডিকেটর দিয়ে অনুমান করা হবে
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                  <input type="text" placeholder="Enter Gemini API key..." value={geminiKeyInput}
+                    onChange={e => setGeminiKeyInput(e.target.value)}
+                    style={{ flex: 1, padding: '10px 12px', borderRadius: 8, background: '#0d1117', color: C.text, border: `1px solid ${C.border}`, fontSize: 12, outline: 'none' }} />
+                  <button onClick={handleSaveGeminiKey} style={{
+                    padding: '0 16px', borderRadius: 8, background: C.gold,
+                    color: '#000', fontWeight: 800, fontSize: 12, border: 'none', cursor: 'pointer',
+                  }}>💾 Save</button>
+                </div>
+
+                <div style={{ fontSize: 10, color: '#555', lineHeight: 1.6 }}>
+                  ফ্রি key পাবেন <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" style={{ color: C.blue }}>aistudio.google.com</a>-এ।
+                  আপনার key শুধু এই ডিভাইসে সেভ থাকে — আমাদের সার্ভারে পাঠানো হয় না।
                 </div>
               </div>
             )}
@@ -691,4 +800,4 @@ export default function App() {
 
     </div>
   )
-    }
+}
