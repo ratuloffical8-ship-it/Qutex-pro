@@ -1,10 +1,10 @@
 import { useEffect, useRef } from 'react'
-import { createChart, CandlestickSeries, ColorType } from 'lightweight-charts'
+import { createChart } from 'lightweight-charts'
 
-// NOTE: this targets lightweight-charts v5's unified addSeries(SeriesType, options)
-// API. If `npm ls lightweight-charts` shows a v4.x install, the old
-// chart.addCandlestickSeries(options) call is needed instead — check
-// node_modules/lightweight-charts/package.json if this throws at runtime.
+// NOTE: uses chart.addCandlestickSeries(options) — the API present in the
+// lightweight-charts version this project actually resolved to. (v5's
+// addSeries(CandlestickSeries, options) needs a named "CandlestickSeries"
+// export that this installed version doesn't provide.)
 
 const C = {
   bg: 'transparent',
@@ -42,7 +42,7 @@ export default function GhostCandleChart({ candles, predicted, height = 220 }) {
     const chart = createChart(container, {
       height,
       layout: {
-        background: { type: ColorType.Solid, color: C.bg },
+        background: { type: 'solid', color: C.bg },
         textColor: C.text,
         fontSize: 10,
       },
@@ -56,7 +56,7 @@ export default function GhostCandleChart({ candles, predicted, height = 220 }) {
     })
     chartRef.current = chart
 
-    const realSeries = chart.addSeries(CandlestickSeries, {
+    const realSeries = chart.addCandlestickSeries({
       upColor: C.green,
       downColor: C.red,
       borderUpColor: C.green,
@@ -81,7 +81,7 @@ export default function GhostCandleChart({ candles, predicted, height = 220 }) {
     // Ghost (predicted) candle — separate series, same price scale, styled
     // translucent gold so it reads as "prediction" rather than real data.
     if (predicted && realData.length > 0) {
-      const ghostSeries = chart.addSeries(CandlestickSeries, {
+      const ghostSeries = chart.addCandlestickSeries({
         upColor: C.ghostUp,
         downColor: C.ghostDown,
         borderUpColor: C.ghostBorder,
@@ -138,4 +138,4 @@ export default function GhostCandleChart({ candles, predicted, height = 220 }) {
       )}
     </div>
   )
-    }
+                    }
