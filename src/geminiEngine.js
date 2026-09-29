@@ -31,7 +31,6 @@ const COOLDOWN_GONE = 30 * 60 * 1000 // 404 (মডেল বন্ধ) হল�
 let modelCache = { at: 0, list: null }
 const cooldown = new Map() // model -> কখন পর্যন্ত স্কিপ করবো
 let lastWorking = null
-const reqSeq = new Map() // পেয়ার -> সর্বশেষ রিকোয়েস্ট নম্বর (পুরনো উত্তর চেনার জন্য)
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 
@@ -212,149 +211,11 @@ function parsePrediction(data, decimals) {
 // ─────────────────────────────────────────────
 // ৫) প্রম্পট (আগের মতোই)
 // ─────────────────────────────────────────────
-// ── ডেটা যাচাই: শুধু আসল, পরিষ্কার, একই পেয়ারের ডেটা যাবে ──
-const countDecimals = (v) => (String(v).split('.')[1] || '').length
-
-function sanitizeCandles(raw) {
-  if (!Array.isArray(raw) || raw.length < 20) {
-    return { ok: false, candles: [], problem: 'ক্যান্ডেল ডেটা নেই বা ২০টির কম', fix: 'TwelveData থেকে ডেটা ঠিকমতো এসেছে কিনা দেখুন, তারপর আবার সিগনাল জেনারেট করুন' }
-  }
-  const seen = new Map()
-  const clean = []
-  for (const c of raw) {
-    const o = parseFloat(c.open), h = parseFloat(c.high), l = parseFloat(c.low), cl = parseFloat(c.close)
-    if (![o, h, l, cl].every(Number.isFinite)) continue
-    if (h < Math.max(o, cl) || l > Math.min(o, cl)) continue // ভাঙা OHLC বাদ
-    const dt = c.datetime ? String(c.datetime) : ''
-    if (dt) {
-      if (seen.has(dt)) {
-        // একই সময়ে ভিন্ন দাম = দুই আলাদা উৎসের ডেটা মিশেছে
-        if (Math.abs(seen.get(dt) - cl) / seen.get(dt) > 0.03) {
-          return { ok: false, candles: [], problem: 'একই সময়ের ক্যান্ডেলে সম্পূর্ণ ভিন্ন দাম পাওয়া গেছে, দুই পেয়ারের ডেটা মিশে গেছে', fix: 'পেয়ার বদলালে আগের ক্যান্ডেল স্টেট পরিষ্কার করে শুধু নতুন পেয়ারের ডেটা পাঠান' }
-        }
-        continue // সাধারণ ডুপ্লিকেট বাদ
-      }
-      seen.set(dt, cl)
-    }
-    const vol = parseFloat(c.volume)
-    clean.push({ datetime: dt, open: o, high: h, low: l, close: cl, volume: Number.isFinite(vol) ? vol : 0, _raw: String(c.close) })
-  }
-  clean.sort((a, b) => (a.datetime < b.datetime ? -1 : a.datetime > b.datetime ? 1 : 0)) // পুরনো → নতুন
-
-  if (clean.length < 20) {
-    return { ok: false, candles: clean, problem: 'যাচাইয়ের পর ব্যবহারযোগ্য ক্যান্ডেল ২০টির কম', fix: 'ডেটা সোর্স চেক করুন' }
-  }
-  // মিশ্রণ ধরার পরীক্ষা: ১ মিনিটে ৩% এর বেশি লাফ বাস্তবে হয় না; হলে অন্য পেয়ারের ডেটা মিশেছে
-  for (let i = 1; i < clean.length; i++) {
-    const jump = Math.abs(clean[i].close - clean[i - 1].close) / clean[i - 1].close
-    if (jump > 0.03) {
-      return {
-        ok: false, candles: clean,
-        problem: `ক্যান্ডেল ডেটায় অস্বাভাবিক লাফ (${(jump * 100).toFixed(1)}%), অন্য পেয়ারের ডেটা মিশে থাকতে পারে`,
-        fix: 'পেয়ার বদলালে আগের চার্ট/ক্যান্ডেল স্টেট পরিষ্কার করে নতুন পেয়ারের ডেটা আনুন',
-      }
-    }
-  }
-  const decimals = Math.min(6, Math.max(...clean.slice(-20).map(c => countDecimals(c._raw)), 2))
-  return { ok: true, candles: clean, decimals }
-}
-
-// ── ইন্ডিকেটরের আসল মান, নিজেদের ক্যান্ডেল থেকে হিসাব ──
-const emaSeries = (vals, p) => {
-  const k = 2 / (p + 1)
-  const out = [vals[0]]
-  for (let i = 1; i < vals.length; i++) out.push(vals[i] * k + out[i - 1] * (1 - k))
-  return out
-}
-const rsiCalc = (closes, p = 14) => {
-  if (closes.length < p + 1) return null
-  let g = 0, l = 0
-  for (let i = 1; i <= p; i++) { const d = closes[i] - closes[i - 1]; if (d >= 0) g += d; else l -= d }
-  g /= p; l /= p
-  for (let i = p + 1; i < closes.length; i++) {
-    const d = closes[i] - closes[i - 1]
-    g = (g * (p - 1) + Math.max(d, 0)) / p
-    l = (l * (p - 1) + Math.max(-d, 0)) / p
-  }
-  return l === 0 ? 100 : 100 - 100 / (1 + g / l)
-}
-
-function computeIndicators(c, decimals) {
-  const closes = c.map(x => x.close)
-  const n = closes.length
-  const P = (v) => (v == null || !Number.isFinite(v) ? 'n/a' : v.toFixed(decimals))
-  const N = (v, d = 1) => (v == null || !Number.isFinite(v) ? 'n/a' : v.toFixed(d))
-  const emaLast = (p) => (n >= p ? emaSeries(closes, p)[n - 1] : null)
-
-  // ATR14
-  let atr = null
-  if (n > 14) {
-    const trs = []
-    for (let i = n - 14; i < n; i++) {
-      trs.push(Math.max(c[i].high - c[i].low, Math.abs(c[i].high - c[i - 1].close), Math.abs(c[i].low - c[i - 1].close)))
-    }
-    atr = trs.reduce((a, b) => a + b, 0) / trs.length
-  }
-  // Bollinger 20
-  let bb = null
-  if (n >= 20) {
-    const w = closes.slice(-20)
-    const mid = w.reduce((a, b) => a + b, 0) / 20
-    const sd = Math.sqrt(w.reduce((a, b) => a + (b - mid) ** 2, 0) / 20)
-    bb = { up: mid + 2 * sd, mid, low: mid - 2 * sd }
-  }
-  // MACD 12/26/9
-  let macd = null
-  if (n >= 35) {
-    const e12 = emaSeries(closes, 12), e26 = emaSeries(closes, 26)
-    const line = e12.map((v, i) => v - e26[i])
-    const sig = emaSeries(line, 9)
-    macd = { line: line[n - 1], sig: sig[n - 1], hist: line[n - 1] - sig[n - 1] }
-  }
-  // Stochastic %K 14
-  let stoch = null
-  if (n >= 14) {
-    const w = c.slice(-14)
-    const hh = Math.max(...w.map(x => x.high)), ll = Math.min(...w.map(x => x.low))
-    stoch = hh === ll ? 50 : ((closes[n - 1] - ll) / (hh - ll)) * 100
-  }
-  const w40 = c.slice(-40)
-  const last = c[n - 1]
-  const body = Math.abs(last.close - last.open)
-  const upWick = last.high - Math.max(last.open, last.close)
-  const loWick = Math.min(last.open, last.close) - last.low
-
-  return [
-    `EMA8=${P(emaLast(8))}, EMA21=${P(emaLast(21))}, EMA50=${P(emaLast(50))}`,
-    `RSI14=${N(rsiCalc(closes, 14))}, Stoch%K14=${N(stoch)}, ATR14=${P(atr)}`,
-    bb ? `Bollinger20 upper=${P(bb.up)}, mid=${P(bb.mid)}, lower=${P(bb.low)}` : 'Bollinger20=n/a',
-    macd ? `MACD line=${macd.line.toFixed(decimals + 1)}, signal=${macd.sig.toFixed(decimals + 1)}, hist=${macd.hist.toFixed(decimals + 1)}` : 'MACD=n/a',
-    `Last40 resistance(high)=${P(Math.max(...w40.map(x => x.high)))}, support(low)=${P(Math.min(...w40.map(x => x.low)))}`,
-    `Last candle: ${last.close >= last.open ? 'bullish' : 'bearish'}, body=${P(body)}, upperWick=${P(upWick)}, lowerWick=${P(loWick)}`,
-  ].join('\n')
-}
-
-// শেষ N ক্যান্ডেল: সময় + OHLC (+ ভলিউম, থাকলে)
-const candleDump = (candles, decimals, last = 40) => {
+const candleDump = (candles, last = 30) => {
   const slice = candles.length > last ? candles.slice(-last) : candles
-  const hasVol = slice.some(c => c.volume > 0)
   return slice
-    .map(c => {
-      const t = c.datetime ? c.datetime.slice(11, 16) + ' ' : ''
-      const v = hasVol ? `,${c.volume}` : ''
-      return `${t}${c.open.toFixed(decimals)},${c.high.toFixed(decimals)},${c.low.toFixed(decimals)},${c.close.toFixed(decimals)}${v}`
-    })
+    .map(c => `${parseFloat(c.open).toFixed(5)},${parseFloat(c.high).toFixed(5)},${parseFloat(c.low).toFixed(5)},${parseFloat(c.close).toFixed(5)}`)
     .join(';')
-}
-
-// ইঞ্জিনের নিজস্ব ইন্ডিকেটর মান থাকলে (engineResult.values / indicators) সেগুলোও পাঠানো হবে
-const engineValuesDump = (engineResult) => {
-  const ev = engineResult?.values || engineResult?.indicators || engineResult?.raw
-  if (!ev || typeof ev !== 'object') return ''
-  return Object.entries(ev)
-    .map(([k, v]) => `${k}=${typeof v === 'number' ? Number(v.toFixed(5)) : JSON.stringify(v)}`)
-    .join(', ')
-    .slice(0, 700)
 }
 
 const voteDump = (breakdown) => Object.entries(breakdown).map(([k, v]) => `${k}:${v}`).join(', ')
@@ -368,32 +229,15 @@ H2, L2, C2 are candle 2's high/low/close (candle 2's open is fixed to equal C1, 
 All six prices use the same number of decimal places as the input prices.
 CONFIDENCE is an integer 0-100, your confidence in candle 1 (the immediate next candle, which is what gets traded).
 REASON must be written in Bengali (বাংলা), up to about 20 words: if the indicators conflict or the setup looks risky/uncertain, explain in Bengali WHY it is risky or confusing; if the indicators agree well, explain in Bengali WHY you are confident. No punctuation beyond commas in REASON.
-The data you receive is REAL live market data for this single pair only (real timestamps, volume when available, and indicator values computed from those exact candles). Use only that data; never assume prices or behavior from any other pair.
 Never add greetings, disclaimers, markdown, or extra lines beyond the one required.
 Never refuse to answer — always output definite predicted candles based on the data given.`
 
 // ─────────────────────────────────────────────
 // ৬) মূল ফাংশন
 // ─────────────────────────────────────────────
-export async function predictNextCandles(key, market, rawCandles, engineResult) {
-  // প্রতি পেয়ারের আলাদা রিকোয়েস্ট নম্বর: পেয়ার বদলালে পুরনো উত্তর stale চিহ্নিত হবে
-  const seq = (reqSeq.get(market) || 0) + 1
-  reqSeq.set(market, seq)
-  const isStale = () => reqSeq.get(market) !== seq
-
-  // ডেটা যাচাই: ভুল/মিশ্র ডেটায় কখনো সিগনাল দেওয়া হবে না
-  const check = sanitizeCandles(rawCandles)
-  if (!check.ok) {
-    return {
-      candle1: null, candle2: null, confidence: 0,
-      reason: `⚠️ কারণ: ${check.problem}। সমাধান: ${check.fix}। ভুল ডেটায় সিগনাল দেওয়া হয়নি।`,
-      ok: false, model: null, errors: [], market, lastCandleTime: null, stale: false,
-    }
-  }
-  const candles = check.candles
-  const decimals = check.decimals
-  const lastClose = candles[candles.length - 1].close
-  const lastCandleTime = candles[candles.length - 1].datetime || null
+export async function predictNextCandles(key, market, candles, engineResult) {
+  const lastClose = parseFloat(candles[candles.length - 1].close)
+  const decimals = (candles[candles.length - 1].close.toString().split('.')[1] || '').length || 5
 
   // Gemini পুরোপুরি ব্যর্থ হলে ইন্ডিকেটর-ভিত্তিক অনুমান (ঘোস্ট ক্যান্ডেল কখনো খালি থাকে না)
   const fallback = (reasonText, errors = []) => {
@@ -421,9 +265,6 @@ export async function predictNextCandles(key, market, rawCandles, engineResult) 
       ok: false,
       model: null,
       errors,
-      market,
-      lastCandleTime,
-      stale: isStale(),
     }
   }
 
@@ -431,14 +272,10 @@ export async function predictNextCandles(key, market, rawCandles, engineResult) 
     return fallback('⚠️ কারণ: Gemini API Key দেওয়া নেই। সমাধান: aistudio.google.com/apikey থেকে key নিয়ে বসান। এখন শুধু ইন্ডিকেটর দিয়ে অনুমান।')
   }
 
-  const engineVals = engineValuesDump(engineResult)
-  const prompt = `Pair: ${market} (timeframe 1m, real TwelveData candles, ${candles.length} candles available, last candle time: ${lastCandleTime || 'n/a'})
-Recent 1m candles (oldest→newest) as "HH:mm o,h,l,c[,volume]" separated by ";":
-${candleDump(candles, decimals)}
+  const prompt = `Pair: ${market}
+Recent 1m candles (oldest→newest, o,h,l,c per candle, ; separated):
+${candleDump(candles)}
 
-Indicator values computed from the real candles above:
-${computeIndicators(candles, decimals)}
-${engineVals ? `Engine indicator values: ${engineVals}\n` : ''}
 Last known close (this is O1, the open of candle 1): ${lastClose.toFixed(decimals)}
 All 11 indicator votes: ${voteDump(engineResult?.breakdown || {})}
 Technical engine reading: strength=${engineResult?.strength ?? 50}/100, agreement=${engineResult?.confidence ?? 0}%
@@ -481,7 +318,7 @@ Respond with exactly one line: O1|H1|L1|C1|H2|L2|C2|CONFIDENCE|REASON`
         const p = parsePrediction(r.data, decimals)
         if (p.result) {
           lastWorking = model
-          return { ...p.result, model, errors, market, lastCandleTime, stale: isStale() }
+          return { ...p.result, model, errors }
         }
         errors.push({ model, status: p.error, message: p.message })
         break // ফরম্যাট ভুল: এই মডেলে আবার নয়, পরেরটায়
@@ -514,4 +351,4 @@ Respond with exactly one line: O1|H1|L1|C1|H2|L2|C2|CONFIDENCE|REASON`
     `⚠️ কারণ: ${info.cause}। সমাধান: ${info.fix}। (চেষ্টা করা মডেল: ${tried || 'কোনোটি নয়'}) এখন ইন্ডিকেটর দিয়ে অনুমান।`,
     errors
   )
-            }
+}
