@@ -32,19 +32,23 @@ const socialBtnStyle = {
 
 // ── Twelve Data config ───────────────────────────────────────
 const TD_BASE = 'https://api.twelvedata.com'
-const CANDLE_COUNT = 150        // history pulled per signal (well under 5000-point cap)
-const DAILY_LIMIT_FALLBACK = 800 // shown until api_usage confirms the real plan limit
-const TRADE_SECONDS = 60         // 1-minute candle prediction
+const CANDLE_COUNT = 150
+const DAILY_LIMIT_FALLBACK = 800
+const TRADE_SECONDS = 60
+
+// ── Gemini: সর্বোচ্চ কতক্ষণ অপেক্ষা করবো ──────────────────────
+// এর বেশি লাগলে Gemini বাদ, ইঞ্জিনের সিগনালই চূড়ান্ত।
+const GEMINI_TIMEOUT_MS = 8000
 
 // ── Free tier config ──────────────────────────────────────────
 const FREE_DAILY_SIGNAL_LIMIT = 3
 
-// ── Social links (footer) ───────────────────────────────────────
+// ── Social links ───────────────────────────────────────────────
 const CHANNEL_LINK = 'https://t.me/ratulhossain4241'
 const GROUP_LINK   = 'https://t.me/ratulhossain424'
 const CHAT_LINK    = 'https://t.me/ratulhossain56'
 
-// ── localStorage helpers (Twelve Data usage) ──────────────────
+// ── Helpers ───────────────────────────────────────────────────
 const localDateStr = () => {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -67,9 +71,6 @@ const bumpStoredUsage = () => {
   return u.count
 }
 
-// ── localStorage helpers (Free-tier daily signal count) ────────
-// Defensive: any malformed/unexpected shape in localStorage is treated
-// as "no usage yet today" rather than accidentally blocking the user.
 const getFreeUsage = () => {
   try {
     const raw = JSON.parse(localStorage.getItem('free_signal_usage'))
@@ -88,8 +89,16 @@ const bumpFreeUsage = () => {
   return u
 }
 
-// Dev/testing helper — exposed on window so you can reset your own free
-// quota from the browser console while testing: window.__resetFreeSignals()
+// ── স্কোর: প্রতিদিন অটো রিসেট (আগে profit কখনো রিসেট হতো না) ──
+const emptyScore = () => ({ win: 0, loss: 0, profit: 0, date: localDateStr() })
+const loadScore = () => {
+  try {
+    const raw = JSON.parse(localStorage.getItem('trade_score'))
+    if (raw && raw.date === localDateStr()) return raw
+  } catch (_) {}
+  return emptyScore()
+}
+
 if (typeof window !== 'undefined') {
   window.__resetFreeSignals = () => {
     localStorage.removeItem('free_signal_usage')
@@ -97,11 +106,18 @@ if (typeof window !== 'undefined') {
   }
 }
 
+// Gemini-কে সময়সীমা দিয়ে দৌড় করাই
+const withTimeout = (promise, ms) =>
+  Promise.race([
+    promise,
+    new Promise(resolve => setTimeout(() => resolve({ timedOut: true }), ms)),
+  ])
+
 export default function App() {
   const tgUser = getTgUser()
 
   // ── Auth / Subscription ────────────────────────────────────────
-  const [authStatus, setAuthStatus] = useState('loading') // loading|new|pending|approved|rejected|expired
+  const [authStatus, setAuthStatus] = useState('loading')
   const [showPaymentModal, setShowPaymentModal] = useState(false)
   const [showRules, setShowRules] = useState(false)
   const [freeUsage, setFreeUsage] = useState(getFreeUsage())
@@ -109,7 +125,7 @@ export default function App() {
   // ── Twelve Data API key state ───────────────────────────────
   const [apiKey, setApiKey] = useState(localStorage.getItem('td_api_key') || '')
   const [keyInput, setKeyInput] = useState('')
-  const [keyValid, setKeyValid] = useState(null)      // null=unchecked, true/false
+  const [keyValid, setKeyValid] = useState(null)
   const [keyChecking, setKeyChecking] = useState(false)
   const [keySavedDate, setKeySavedDate] = useState(localStorage.getItem('td_key_saved_date') || null)
   const [usage, setUsage] = useState(getStoredUsage())
@@ -119,9 +135,9 @@ export default function App() {
   const [geminiKey, setGeminiKey] = useState(localStorage.getItem('gemini_api_key') || '')
   const [geminiKeyInput, setGeminiKeyInput] = useState('')
 
-  // ── AI ghost-candle prediction (2 chained candles) ──────────
-  const [chartCandles, setChartCandles] = useState([])          // real candles, kept just for the chart
-  const [predictedCandles, setPredictedCandles] = useState(null) // [candle1, candle2] or null
+  // ── AI ghost-candle prediction ──────────────────────────────
+  const [chartCandles, setChartCandles] = useState([])
+  const [predictedCandles, setPredictedCandles] = useState(null)
   const [predictedReason, setPredictedReason] = useState('')
   const [predicting, setPredicting] = useState(false)
 
@@ -133,19 +149,24 @@ export default function App() {
   const [lastPred, setLastPred] = useState(null)
   const [mLevel, setMLevel] = useState(1)
   const [scanning, setScanning] = useState(false)
-  const [score, setScore] = useState(JSON.parse(localStorage.getItem('trade_score')) || { win: 0, loss: 0, profit: 0 })
+  const [score, setScore] = useState(loadScore)
   const [unlockTime, setUnlockTime] = useState(localStorage.getItem('unlock_time') || null)
   const [isLocked, setIsLocked] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [entryAt, setEntryAt] = useState(null) // কখন নতুন ক্যান্ডেল শুরু (এন্ট্রির সময়)
+  const [entryLeft, setEntryLeft] = useState(0)
   const resultTimerRef = useRef(null)
+  const mLevelRef = useRef(1)
+  useEffect(() => { mLevelRef.current = mLevel }, [mLevel])
 
   const dailyTarget = (() => {
     if (!localStorage.getItem('start_date')) localStorage.setItem('start_date', new Date().toISOString())
     const days = Math.floor((Date.now() - new Date(localStorage.getItem('start_date'))) / 86400000)
     return days < 3 ? 6 : days < 6 ? 12 : 20
   })()
+  const dailyTargetRef = useRef(dailyTarget)
+  useEffect(() => { dailyTargetRef.current = dailyTarget }, [dailyTarget])
 
-  // ── Is this user premium right now? ─────────────────────────
   const isPremium = authStatus === 'approved'
 
   // ── Firestore auth listener ───────────────────────────────────
@@ -176,25 +197,39 @@ export default function App() {
     return () => unsub()
   }, [tgUser.id])
 
-  // ── Clock + lock timer ──────────────────────────────────────
+  // ── Clock + lock timer + entry countdown ─────────────────────
   useEffect(() => {
     const tick = setInterval(() => {
       const now = new Date()
       setLiveTime(now.toLocaleTimeString('en-GB'))
+
       if (unlockTime) {
-        if (now < new Date(unlockTime)) setIsLocked(true)
-        else { setIsLocked(false); setUnlockTime(null); localStorage.removeItem('unlock_time') }
+        if (now < new Date(unlockTime)) {
+          setIsLocked(true)
+        } else {
+          // আনলক হলো → নতুন সেশনের জন্য profit রিসেট (নইলে সাথে সাথে আবার লক হতো)
+          setIsLocked(false)
+          setUnlockTime(null)
+          localStorage.removeItem('unlock_time')
+          const fresh = emptyScore()
+          setScore(fresh)
+          localStorage.setItem('trade_score', JSON.stringify(fresh))
+        }
       }
-      // keep free-usage display in sync across local-midnight rollover
+
       setFreeUsage(getFreeUsage())
+
+      if (entryAt) {
+        const left = Math.max(0, Math.ceil((entryAt - Date.now()) / 1000))
+        setEntryLeft(left)
+      }
     }, 1000)
     return () => clearInterval(tick)
-  }, [unlockTime])
+  }, [unlockTime, entryAt])
 
-  // ── Cleanup pending result-check timer on unmount ───────────
   useEffect(() => () => { if (resultTimerRef.current) clearTimeout(resultTimerRef.current) }, [])
 
-  // ── Twelve Data: fetch usage + validate key ─────────────────
+  // ── Twelve Data: validate key ───────────────────────────────
   const checkKeyStatus = useCallback(async (key) => {
     if (!key) { setKeyValid(null); return }
     setKeyChecking(true)
@@ -208,7 +243,7 @@ export default function App() {
         if (typeof data.current_usage === 'number') {
           setUsage(prev => ({ ...prev, count: data.current_usage }))
         }
-        setPlanLimit(800);
+        setPlanLimit(800)
       }
     } catch (_) {
       setKeyValid(false)
@@ -244,7 +279,6 @@ export default function App() {
     setConnStatus('API KEY লাগবে')
   }
 
-  // ── Gemini key save/delete ────────────────────────────────────
   const handleSaveGeminiKey = () => {
     const trimmed = geminiKeyInput.trim()
     if (!trimmed) return
@@ -279,26 +313,75 @@ export default function App() {
     bumpStoredUsage()
     setUsage(getStoredUsage())
 
-    // Twelve Data returns newest-first by default → reverse to chronological
     const chronological = data.values.slice().reverse().map(v => ({
       open: v.open, high: v.high, low: v.low, close: v.close, datetime: v.datetime,
     }))
-    // Drop the last bar — on the free plan it may still be forming / delayed,
-    // so we only trust fully-closed candles for signal math.
+    // শেষ বার (চলমান ক্যান্ডেল) বাদ — শুধু বন্ধ হওয়া ক্যান্ডেল দিয়ে হিসাব
     return chronological.slice(0, -1)
   }, [apiKey])
 
-  // ── Manual signal generation ────────────────────────────────
+  // ── Result check (একবারই, পোলিং নয়) ───────────────────────
+  const checkResult = useCallback(async (predDirection, symbol) => {
+    if (!apiKey) return
+    try {
+      const url = `${TD_BASE}/time_series?symbol=${encodeURIComponent(symbol)}&interval=1min&outputsize=3&apikey=${apiKey}`
+      const res = await fetch(url)
+      const data = await res.json()
+      bumpStoredUsage()
+      setUsage(getStoredUsage())
+
+      if (data.status === 'error' || !data.values) return
+      const chronological = data.values.slice().reverse()
+      const closed = chronological[chronological.length - 2] // শেষ বন্ধ হওয়া ক্যান্ডেল = আমাদের ট্রেডের ক্যান্ডেল
+      if (!closed) return
+
+      const actual = parseFloat(closed.close) > parseFloat(closed.open) ? 'CALL' : 'PUT'
+      const isWin = predDirection === actual
+      const lvl = mLevelRef.current
+
+      setScore(prev => {
+        const base = prev.date === localDateStr() ? prev : emptyScore()
+        const change = isWin ? parseFloat((lvl * 0.85).toFixed(2)) : -lvl
+        const updated = {
+          win: isWin ? base.win + 1 : base.win,
+          loss: isWin ? base.loss : base.loss + 1,
+          profit: parseFloat((base.profit + change).toFixed(2)),
+          date: localDateStr(),
+        }
+        localStorage.setItem('trade_score', JSON.stringify(updated))
+        if (updated.profit >= dailyTargetRef.current) {
+          const lock = new Date(Date.now() + 12 * 3600 * 1000).toISOString()
+          setUnlockTime(lock); localStorage.setItem('unlock_time', lock)
+        }
+        return updated
+      })
+
+      setMLevel(prev => isWin ? 1 : prev === 1 ? 2.5 : prev === 2.5 ? 5.5 : 1)
+      setLastPred(null)
+      setEntryAt(null)
+      setEntryLeft(0)
+      setSigData(prev => ({ direction: null, strength: prev.strength, breakdown: prev.breakdown, confidence: prev.confidence }))
+      setPredictedCandles(null)
+      setPredictedReason('')
+      setConnStatus(isWin ? 'WIN ✅' : 'LOSS ❌')
+    } catch (e) {
+      console.error('checkResult error:', e)
+    }
+  }, [apiKey])
+
+  // ── সিগনাল জেনারেশন ───────────────────────────────────────
+  // নিয়ম: ইঞ্জিন সিদ্ধান্ত নেয়। Gemini শুধু যাচাই করে (সর্বোচ্চ ৮ সেকেন্ড)।
+  //  • ইঞ্জিনে সিগনাল নেই        → ট্রেড নয়
+  //  • Gemini উল্টো বললে         → ট্রেড নয়
+  //  • Gemini ধীর/ব্যর্থ          → ইঞ্জিনের সিগনালই (দেরি নয়)
   const generateSignal = useCallback(async () => {
     if (!apiKey) { setConnStatus('API KEY লাগবে'); setShowSettings(true); return }
     if (isLocked) return
     if (usage.count >= planLimit) { setConnStatus('DAILY LIMIT শেষ ❌'); return }
 
-    // ── Free-tier daily signal limit gate ─────────────────────
     if (!isPremium) {
       const fu = getFreeUsage()
       if (fu.count >= FREE_DAILY_SIGNAL_LIMIT) {
-        console.log(`ফ্রি লিমিট গেট: আজকের (${fu.date}) ব্যবহৃত সিগনাল ${fu.count}/${FREE_DAILY_SIGNAL_LIMIT} — টেস্টের সময় রিসেট করতে window.__resetFreeSignals() রান করুন।`)
         setConnStatus('ফ্রি লিমিট শেষ ❌')
         setShowPaymentModal(true)
         return
@@ -309,48 +392,81 @@ export default function App() {
     setConnStatus('ডেটা আনা হচ্ছে...')
     setPredictedCandles(null)
     setPredictedReason('')
+    setEntryAt(null)
+
+    const symbol = selected.td
 
     try {
-      const candles = await fetchCandles(selected.td)
+      const candles = await fetchCandles(symbol)
       if (candles.length < MIN_CANDLES) {
         setConnStatus('পর্যাপ্ত ডেটা নেই ❌')
-        setScanning(false)
         return
       }
 
       const result = runSignalEngine(candles)
       setChartCandles(candles)
 
-      // ── Ask Gemini for the next TWO candles' exact O/H/L/C ────
-      setConnStatus('Gemini বিশ্লেষণ করছে...')
-      setPredicting(true)
-      const prediction = await predictNextCandles(geminiKey, selected.name, candles, result)
-      setPredicting(false)
+      // ধাপ ১: ইঞ্জিনেই সিগনাল নেই → এখানেই শেষ, কোটা কাটবে না
+      if (!result.direction) {
+        setSigData({ ...result, direction: null })
+        setConnStatus('⏸ নিশ্চিত সিগনাল নেই — আবার চেষ্টা করুন')
+        return
+      }
 
-      setPredictedCandles([prediction.candle1, prediction.candle2])
-      setPredictedReason(prediction.reason)
+      // ধাপ ২: Gemini যাচাই (সময়সীমা সহ)
+      let finalConfidence = result.confidence
+      let geminiNote = ''
 
-      // Final direction/scoring comes from candle 1 only (the immediate
-      // next minute — what a 60s trade actually resolves against).
-      // Candle 2 is shown as a look-ahead extra, not scored.
-      const finalDir = prediction.candle1.close > prediction.candle1.open ? 'CALL' : 'PUT'
-      const finalConfidence = prediction.ok
-        ? Math.round((result.confidence + prediction.confidence) / 2)
-        : result.confidence
+      if (geminiKey) {
+        setConnStatus('Gemini যাচাই করছে (সর্বোচ্চ ৮ সেকেন্ড)...')
+        setPredicting(true)
+        let pred = null
+        try {
+          pred = await withTimeout(
+            predictNextCandles(geminiKey, selected.name, candles, result),
+            GEMINI_TIMEOUT_MS
+          )
+        } catch (e) {
+          console.warn('Gemini error:', e)
+        }
+        setPredicting(false)
 
+        if (pred && !pred.timedOut && pred.ok) {
+          const gemDir = pred.candle1.close > pred.candle1.open ? 'CALL' : 'PUT'
+          if (gemDir !== result.direction) {
+            // দুজনে না মিললে ট্রেড নয়
+            setSigData({ ...result, direction: null })
+            setPredictedCandles([pred.candle1, pred.candle2])
+            setPredictedReason(pred.reason)
+            setConnStatus('⏸ ইঞ্জিন ও Gemini মেলেনি — ট্রেড নয়')
+            return
+          }
+          setPredictedCandles([pred.candle1, pred.candle2])
+          setPredictedReason(pred.reason)
+          finalConfidence = Math.round((result.confidence + pred.confidence) / 2)
+        } else {
+          geminiNote = pred?.timedOut ? 'Gemini ধীর' : 'Gemini ব্যর্থ'
+        }
+      }
+
+      const finalDir = result.direction
       setSigData({ ...result, direction: finalDir, confidence: finalConfidence })
-      setConnStatus('CONNECTED ✅')
+      setConnStatus(geminiNote ? `CONNECTED ✅ (${geminiNote}, ইঞ্জিন সিগনাল)` : 'CONNECTED ✅')
 
-      // Count this generation against the free daily quota (premium = unlimited)
       if (!isPremium) setFreeUsage(bumpFreeUsage())
-
       setLastPred(finalDir)
       try { new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg').play() } catch (_) {}
 
-      // Schedule exactly ONE follow-up check after the trade duration —
-      // this costs 1 extra API call, not a repeating poll.
+      // এন্ট্রি: পরের মিনিটের শুরুতে। রেজাল্ট: সেই ক্যান্ডেল বন্ধ হওয়ার ৫ সেকেন্ড পর।
+      const secToNextMinute = 60 - new Date().getSeconds()
+      setEntryAt(Date.now() + secToNextMinute * 1000)
+      setEntryLeft(secToNextMinute)
+
       if (resultTimerRef.current) clearTimeout(resultTimerRef.current)
-      resultTimerRef.current = setTimeout(() => { checkResult(finalDir) }, (TRADE_SECONDS + 5) * 1000)
+      resultTimerRef.current = setTimeout(
+        () => { checkResult(finalDir, symbol) },
+        (secToNextMinute + TRADE_SECONDS + 5) * 1000
+      )
     } catch (e) {
       console.error(e)
       setConnStatus(/invalid api key/i.test(e.message) ? 'API KEY ভুল ❌' : 'ERROR ❌')
@@ -358,52 +474,7 @@ export default function App() {
     } finally {
       setScanning(false)
     }
-  }, [apiKey, geminiKey, selected, isLocked, usage, planLimit, fetchCandles, isPremium]) // eslint-disable-line
-
-  // ── Result check (single follow-up call, not polling) ──────
-  const checkResult = useCallback(async (predDirection) => {
-    if (!apiKey) return
-    try {
-      const url = `${TD_BASE}/time_series?symbol=${encodeURIComponent(selected.td)}&interval=1min&outputsize=3&apikey=${apiKey}`
-      const res = await fetch(url)
-      const data = await res.json()
-      bumpStoredUsage()
-      setUsage(getStoredUsage())
-
-      if (data.status === 'error' || !data.values) return
-      const chronological = data.values.slice().reverse()
-      const closed = chronological[chronological.length - 2] // last fully-closed bar
-      if (!closed) return
-
-      const actual = parseFloat(closed.close) > parseFloat(closed.open) ? 'CALL' : 'PUT'
-      const isWin = predDirection === actual
-
-      setScore(prev => {
-        const change = isWin ? parseFloat((mLevel * 0.85).toFixed(2)) : -mLevel
-        const updated = {
-          win: isWin ? prev.win + 1 : prev.win,
-          loss: isWin ? prev.loss : prev.loss + 1,
-          profit: parseFloat((prev.profit + change).toFixed(2)),
-        }
-        localStorage.setItem('trade_score', JSON.stringify(updated))
-        if (updated.profit >= dailyTarget) {
-          const lock = new Date(Date.now() + 12 * 3600 * 1000).toISOString()
-          setUnlockTime(lock); localStorage.setItem('unlock_time', lock)
-        }
-        return updated
-      })
-
-      setMLevel(prev => isWin ? 1 : prev === 1 ? 2.5 : prev === 2.5 ? 5.5 : 1)
-      setLastPred(null)
-      // Keep breakdown visible — only clear direction/confidence, not the indicator readout
-      setSigData(prev => ({ direction: null, strength: prev.strength, breakdown: prev.breakdown, confidence: prev.confidence }))
-      // Ghost candles have now become real, resolved candles — clear them
-      setPredictedCandles(null)
-      setPredictedReason('')
-    } catch (e) {
-      console.error('checkResult error:', e)
-    }
-  }, [apiKey, selected, mLevel, dailyTarget])
+  }, [apiKey, geminiKey, selected, isLocked, usage, planLimit, fetchCandles, isPremium, checkResult]) // eslint-disable-line
 
   // ── Loading screen ────────────────────────────────────────────
   if (authStatus === 'loading') {
@@ -415,7 +486,6 @@ export default function App() {
     )
   }
 
-  // ── Trading UI (always shown once loaded — free users included) ─
   const dir = sigData.direction
   const str = sigData.strength
   const conf = sigData.confidence
@@ -431,9 +501,9 @@ export default function App() {
 
   const handleReset = () => {
     if (!window.confirm('স্কোর রিসেট করবেন?')) return
-    const e = { win: 0, loss: 0, profit: 0 }
+    const e = emptyScore()
     setScore(e)
-    localStorage.removeItem('trade_score')
+    localStorage.setItem('trade_score', JSON.stringify(e))
     localStorage.removeItem('start_date')
   }
 
@@ -443,9 +513,7 @@ export default function App() {
   return (
     <div style={{ background: C.bg, color: C.text, fontFamily: "'Inter',sans-serif", minHeight: '100vh', overflowX: 'hidden' }}>
 
-      {/* ── HEADER — connStatus | badge/upgrade | 📜 Rules | time ──
-          Rules icon lives HERE (not inside the isLocked block below) so
-          it is always reachable — locked, free, premium, doesn't matter. */}
+      {/* ── HEADER ── */}
       <header style={{
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         padding: '8px 14px', background: C.card, borderBottom: `1px solid ${C.border}`,
@@ -467,7 +535,6 @@ export default function App() {
             }}>⬆️ Upgrade</button>
           )}
 
-          {/* Rules — always visible to every user, every state */}
           <button onClick={() => setShowRules(true)} aria-label="Rules" style={{
             background: C.panel, border: `1px solid ${C.border}`, color: C.gold,
             borderRadius: 6, padding: '4px 8px', fontSize: 13, cursor: 'pointer', lineHeight: 1,
@@ -477,7 +544,7 @@ export default function App() {
         <span style={{ color: C.muted, fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>{liveTime}</span>
       </header>
 
-      {/* ── SUB-HEADER: target + free/premium status ── */}
+      {/* ── SUB-HEADER ── */}
       <div style={{
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         padding: '6px 14px', background: '#0d1117', borderBottom: `1px solid ${C.border}`,
@@ -493,7 +560,7 @@ export default function App() {
         )}
       </div>
 
-      {/* ── pending / rejected / expired notice banners (non-blocking) ── */}
+      {/* ── notice banners ── */}
       {authStatus === 'pending' && (
         <div style={{ background: '#1a1200', borderBottom: `1px solid ${C.gold}33`, color: C.gold, fontSize: 11, padding: '8px 14px', textAlign: 'center' }}>
           ⏳ আপনার পেমেন্ট রিভিউতে আছে — কনফার্ম হলে প্রিমিয়াম অ্যাক্টিভ হবে
@@ -520,13 +587,7 @@ export default function App() {
         />
       </div>
 
-      {/* ── AI GHOST-CANDLE PREDICTION (2 chained candles) ──
-          Custom-rendered chart (not the TradingView iframe — iframes can't
-          be drawn on top of) showing the real recent candles plus two
-          direction-colored "predicted" candles from Gemini (white=UP,
-          gold=DOWN). Uses TwelveData, same source as the indicator engine —
-          it will not pixel-match the TradingView chart above (different
-          data vendor), by your own choice to keep TradingView as-is. */}
+      {/* ── AI GHOST-CANDLE ── */}
       <div style={{ padding: '10px 12px 0' }}>
         <div style={{ background: C.card, borderRadius: 12, padding: 10, border: `1px solid ${C.border}` }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
@@ -593,6 +654,14 @@ export default function App() {
                 {sigLabel}
               </div>
 
+              {dir && entryAt && (
+                <div style={{ textAlign: 'center', marginBottom: 10, fontSize: 12, fontWeight: 800, color: entryLeft > 0 ? C.gold : C.green }}>
+                  {entryLeft > 0
+                    ? `⏱ নতুন ক্যান্ডেল শুরু হতে ${entryLeft} সেকেন্ড — তখন এন্ট্রি নিন`
+                    : '🟢 এখনই এন্ট্রি (ক্যান্ডেল চলছে)'}
+                </div>
+              )}
+
               {dir && (
                 <div style={{ textAlign: 'center', marginBottom: 10 }}>
                   <span style={{
@@ -617,7 +686,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Breakdown — always visible once first signal is generated, top 4 first */}
               {Object.keys(sigData.breakdown).length > 0 && (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 6px', marginBottom: 8 }}>
                   {Object.entries(sigData.breakdown).map(([k, v]) => (
@@ -741,7 +809,7 @@ export default function App() {
 
                 {/* ── Gemini API Key ── */}
                 <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 10 }}>
-                  🔮 Gemini API Key (AI প্রেডিকশনের জন্য)
+                  🔮 Gemini API Key (AI যাচাইয়ের জন্য)
                 </div>
 
                 {geminiKey ? (
@@ -758,7 +826,7 @@ export default function App() {
                   </div>
                 ) : (
                   <div style={{ color: C.muted, fontSize: 11, marginBottom: 10 }}>
-                    কোনো key সেভ করা নেই — ছাড়া শুধু ইন্ডিকেটর দিয়ে অনুমান করা হবে
+                    কোনো key সেভ করা নেই — শুধু ইন্ডিকেটর ইঞ্জিনের সিগনাল আসবে
                   </div>
                 )}
 
@@ -781,7 +849,7 @@ export default function App() {
           </>
         )}
 
-        {/* ── SOCIAL FOOTER — small, bottom of app ── */}
+        {/* ── SOCIAL FOOTER ── */}
         <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
           <button onClick={() => window.open(CHANNEL_LINK, '_blank')} style={socialBtnStyle}>📢 চ্যানেল</button>
           <button onClick={() => window.open(GROUP_LINK, '_blank')} style={socialBtnStyle}>👥 গ্রুপ</button>
@@ -789,7 +857,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* ── UPGRADE / PAYMENT MODAL ── */}
       {showPaymentModal && (
         <PaymentPage
           tgUser={tgUser}
@@ -798,9 +865,8 @@ export default function App() {
         />
       )}
 
-      {/* ── RULES MODAL — reachable by every user, every state (locked included) ── */}
       {showRules && <RulesPage onClose={() => setShowRules(false)} />}
 
     </div>
   )
-    }
+      }
