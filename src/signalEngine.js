@@ -1,88 +1,58 @@
 // ══════════════════════════════════════════════════════════
-//   MASTER AI — SIGNAL ENGINE (11 Indicators)
+//   MASTER AI — SIGNAL ENGINE (11 Indicators) — v2
 //   Data Source: Twelve Data (REST API)
+//
+//   v2 ফিক্স:
+//   • দুর্বল ভোট (weight-এর ৫০% এর কম) এখন কনফিডেন্সে গোনা হয় না
+//   • Fractal / Pattern না থাকলে maxScore বাড়ে না (আগে strength ৫০-এর দিকে টানত)
+//   • MACD এখন সঠিক EMA(9) সিগনাল লাইন ব্যবহার করে
+//   • CALL/PUT-এর জন্য কমপক্ষে ৫টি শক্ত ভোট একমত হতে হবে
 // ══════════════════════════════════════════════════════════
 
-// ── Forex Market List (Twelve Data symbol format) ────────────
+const mk = (pairs, cat) =>
+  pairs.map(p => ({ name: p, td: p, tv: 'FX:' + p.replace('/', ''), cat }))
+
 export const forexMarkets = [
-  // Majors
-  { name: 'EUR/USD', td: 'EUR/USD', tv: 'FX:EURUSD', cat: 'Major' },
-  { name: 'GBP/USD', td: 'GBP/USD', tv: 'FX:GBPUSD', cat: 'Major' },
-  { name: 'USD/JPY', td: 'USD/JPY', tv: 'FX:USDJPY', cat: 'Major' },
-  { name: 'USD/CHF', td: 'USD/CHF', tv: 'FX:USDCHF', cat: 'Major' },
-  { name: 'USD/CAD', td: 'USD/CAD', tv: 'FX:USDCAD', cat: 'Major' },
-  { name: 'AUD/USD', td: 'AUD/USD', tv: 'FX:AUDUSD', cat: 'Major' },
-  { name: 'NZD/USD', td: 'NZD/USD', tv: 'FX:NZDUSD', cat: 'Major' },
-  // Crosses — EUR
-  { name: 'EUR/GBP', td: 'EUR/GBP', tv: 'FX:EURGBP', cat: 'Cross' },
-  { name: 'EUR/JPY', td: 'EUR/JPY', tv: 'FX:EURJPY', cat: 'Cross' },
-  { name: 'EUR/CHF', td: 'EUR/CHF', tv: 'FX:EURCHF', cat: 'Cross' },
-  { name: 'EUR/CAD', td: 'EUR/CAD', tv: 'FX:EURCAD', cat: 'Cross' },
-  { name: 'EUR/AUD', td: 'EUR/AUD', tv: 'FX:EURAUD', cat: 'Cross' },
-  { name: 'EUR/NZD', td: 'EUR/NZD', tv: 'FX:EURNZD', cat: 'Cross' },
-  // Crosses — GBP
-  { name: 'GBP/JPY', td: 'GBP/JPY', tv: 'FX:GBPJPY', cat: 'Cross' },
-  { name: 'GBP/CHF', td: 'GBP/CHF', tv: 'FX:GBPCHF', cat: 'Cross' },
-  { name: 'GBP/CAD', td: 'GBP/CAD', tv: 'FX:GBPCAD', cat: 'Cross' },
-  { name: 'GBP/AUD', td: 'GBP/AUD', tv: 'FX:GBPAUD', cat: 'Cross' },
-  { name: 'GBP/NZD', td: 'GBP/NZD', tv: 'FX:GBPNZD', cat: 'Cross' },
-  // Crosses — AUD
-  { name: 'AUD/JPY', td: 'AUD/JPY', tv: 'FX:AUDJPY', cat: 'Cross' },
-  { name: 'AUD/CHF', td: 'AUD/CHF', tv: 'FX:AUDCHF', cat: 'Cross' },
-  { name: 'AUD/CAD', td: 'AUD/CAD', tv: 'FX:AUDCAD', cat: 'Cross' },
-  { name: 'AUD/NZD', td: 'AUD/NZD', tv: 'FX:AUDNZD', cat: 'Cross' },
-  // Crosses — NZD
-  { name: 'NZD/JPY', td: 'NZD/JPY', tv: 'FX:NZDJPY', cat: 'Cross' },
-  { name: 'NZD/CHF', td: 'NZD/CHF', tv: 'FX:NZDCHF', cat: 'Cross' },
-  { name: 'NZD/CAD', td: 'NZD/CAD', tv: 'FX:NZDCAD', cat: 'Cross' },
-  // Crosses — CAD
-  { name: 'CAD/JPY', td: 'CAD/JPY', tv: 'FX:CADJPY', cat: 'Cross' },
-  { name: 'CAD/CHF', td: 'CAD/CHF', tv: 'FX:CADCHF', cat: 'Cross' },
-  // Crosses — CHF
-  { name: 'CHF/JPY', td: 'CHF/JPY', tv: 'FX:CHFJPY', cat: 'Cross' },
-  // Exotics
-  { name: 'USD/SGD', td: 'USD/SGD', tv: 'FX:USDSGD', cat: 'Exotic' },
-  { name: 'USD/HKD', td: 'USD/HKD', tv: 'FX:USDHKD', cat: 'Exotic' },
-  { name: 'USD/SEK', td: 'USD/SEK', tv: 'FX:USDSEK', cat: 'Exotic' },
-  { name: 'USD/NOK', td: 'USD/NOK', tv: 'FX:USDNOK', cat: 'Exotic' },
-  { name: 'USD/DKK', td: 'USD/DKK', tv: 'FX:USDDKK', cat: 'Exotic' },
-  { name: 'USD/MXN', td: 'USD/MXN', tv: 'FX:USDMXN', cat: 'Exotic' },
-  { name: 'USD/ZAR', td: 'USD/ZAR', tv: 'FX:USDZAR', cat: 'Exotic' },
-  { name: 'USD/TRY', td: 'USD/TRY', tv: 'FX:USDTRY', cat: 'Exotic' },
-  { name: 'USD/PLN', td: 'USD/PLN', tv: 'FX:USDPLN', cat: 'Exotic' },
-  { name: 'USD/HUF', td: 'USD/HUF', tv: 'FX:USDHUF', cat: 'Exotic' },
-  { name: 'USD/CZK', td: 'USD/CZK', tv: 'FX:USDCZK', cat: 'Exotic' },
-  { name: 'EUR/SEK', td: 'EUR/SEK', tv: 'FX:EURSEK', cat: 'Exotic' },
-  { name: 'EUR/NOK', td: 'EUR/NOK', tv: 'FX:EURNOK', cat: 'Exotic' },
-  { name: 'EUR/PLN', td: 'EUR/PLN', tv: 'FX:EURPLN', cat: 'Exotic' },
-  { name: 'EUR/TRY', td: 'EUR/TRY', tv: 'FX:EURTRY', cat: 'Exotic' },
-  { name: 'GBP/SEK', td: 'GBP/SEK', tv: 'FX:GBPSEK', cat: 'Exotic' },
-  { name: 'GBP/NOK', td: 'GBP/NOK', tv: 'FX:GBPNOK', cat: 'Exotic' },
-  { name: 'SGD/JPY', td: 'SGD/JPY', tv: 'FX:SGDJPY', cat: 'Exotic' },
-  { name: 'USD/INR', td: 'USD/INR', tv: 'FX:USDINR', cat: 'Exotic' },
-  { name: 'USD/THB', td: 'USD/THB', tv: 'FX:USDTHB', cat: 'Exotic' },
-  { name: 'USD/CNH', td: 'USD/CNH', tv: 'FX:USDCNH', cat: 'Exotic' },
+  ...mk(['EUR/USD', 'GBP/USD', 'USD/JPY', 'USD/CHF', 'USD/CAD', 'AUD/USD', 'NZD/USD'], 'Major'),
+  ...mk([
+    'EUR/GBP', 'EUR/JPY', 'EUR/CHF', 'EUR/CAD', 'EUR/AUD', 'EUR/NZD',
+    'GBP/JPY', 'GBP/CHF', 'GBP/CAD', 'GBP/AUD', 'GBP/NZD',
+    'AUD/JPY', 'AUD/CHF', 'AUD/CAD', 'AUD/NZD',
+    'NZD/JPY', 'NZD/CHF', 'NZD/CAD',
+    'CAD/JPY', 'CAD/CHF', 'CHF/JPY',
+  ], 'Cross'),
+  ...mk([
+    'USD/SGD', 'USD/HKD', 'USD/SEK', 'USD/NOK', 'USD/DKK', 'USD/MXN', 'USD/ZAR',
+    'USD/TRY', 'USD/PLN', 'USD/HUF', 'USD/CZK', 'EUR/SEK', 'EUR/NOK', 'EUR/PLN',
+    'EUR/TRY', 'GBP/SEK', 'GBP/NOK', 'SGD/JPY', 'USD/INR', 'USD/THB', 'USD/CNH',
+  ], 'Exotic'),
 ]
 
-// Minimum candles needed for all indicators to compute reliably
-// (Ichimoku needs 52, MACD needs 35, EMA50 needs 50 → use 60 buffer)
+// Ichimoku 52, MACD 35, EMA50 50 → 60 বাফার
 export const MIN_CANDLES = 60
+
+// কমপক্ষে কতটি শক্ত ভোট একমত হলে সিগনাল (১১টির মধ্যে)
+const MIN_STRONG_AGREE = 5
 
 // ══════════════════════════════════════════════════════════
 //   CORE MATH HELPERS
 // ══════════════════════════════════════════════════════════
 
-const ema = (arr, p) => {
-  if (arr.length < p) return null
+const emaSeries = (arr, p) => {
+  if (arr.length < p) return []
   const k = 2 / (p + 1)
   let val = arr.slice(0, p).reduce((a, b) => a + b, 0) / p
-  for (let i = p; i < arr.length; i++) val = arr[i] * k + val * (1 - k)
-  return val
+  const out = [val]
+  for (let i = p; i < arr.length; i++) {
+    val = arr[i] * k + val * (1 - k)
+    out.push(val)
+  }
+  return out
 }
 
-const sma = (arr, p) => {
-  if (arr.length < p) return null
-  return arr.slice(-p).reduce((a, b) => a + b, 0) / p
+const ema = (arr, p) => {
+  const s = emaSeries(arr, p)
+  return s.length ? s[s.length - 1] : null
 }
 
 const rsi = (arr, p = 14) => {
@@ -102,18 +72,18 @@ const bb = (arr, p = 20) => {
   return { upper: mid + 2 * std, mid, lower: mid - 2 * std }
 }
 
+// সঠিক MACD: EMA12 − EMA26, সিগনাল = MACD লাইনের EMA9
 const macdFull = (arr) => {
   if (arr.length < 35) return null
-  const series = []
-  for (let i = arr.length - 9; i < arr.length; i++) {
-    const sl = arr.slice(0, i + 1)
-    const e12 = ema(sl, 12), e26 = ema(sl, 26)
-    if (e12 && e26) series.push(e12 - e26)
-  }
-  if (series.length < 9) return null
-  const sig = series.reduce((a, b) => a + b, 0) / 9
-  const line = series[series.length - 1]
-  return { line, signal: sig, hist: line - sig }
+  const e12 = emaSeries(arr, 12) // index 0 ↔ arr[11]
+  const e26 = emaSeries(arr, 26) // index 0 ↔ arr[25]
+  const lineSeries = []
+  for (let i = 25; i < arr.length; i++) lineSeries.push(e12[i - 11] - e26[i - 25])
+  const sigSeries = emaSeries(lineSeries, 9)
+  if (!sigSeries.length) return null
+  const line = lineSeries[lineSeries.length - 1]
+  const signal = sigSeries[sigSeries.length - 1]
+  return { line, signal, hist: line - signal }
 }
 
 const stoch = (candles, p = 14) => {
@@ -124,16 +94,6 @@ const stoch = (candles, p = 14) => {
   const cl = parseFloat(candles[candles.length - 1].close)
   if (hh === ll) return 50
   return ((cl - ll) / (hh - ll)) * 100
-}
-
-const atr = (candles, p = 14) => {
-  if (candles.length < p + 1) return null
-  const trs = candles.slice(-(p + 1)).map((c, i, a) => {
-    if (i === 0) return 0
-    const h = parseFloat(c.high), l = parseFloat(c.low), pc = parseFloat(a[i - 1].close)
-    return Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc))
-  }).slice(1)
-  return trs.reduce((a, b) => a + b, 0) / p
 }
 
 const patternScore = (candles) => {
@@ -159,10 +119,9 @@ const patternScore = (candles) => {
 }
 
 // ══════════════════════════════════════════════════════════
-//   TOP-TIER INDICATORS (ADX, Supertrend, Ichimoku, Fractal2)
+//   TOP-TIER INDICATORS
 // ══════════════════════════════════════════════════════════
 
-// ── ADX + DI (Wilder's smoothing, standard 14-period) ────────
 const calcADX = (candles, p = 14) => {
   if (candles.length < p * 2 + 1) return null
   const highs = candles.map(c => parseFloat(c.high))
@@ -205,7 +164,6 @@ const calcADX = (candles, p = 14) => {
   return { adx: adxVal, plusDI: plusDI.at(-1), minusDI: minusDI.at(-1) }
 }
 
-// ── Supertrend (ATR period 10, multiplier 3 — industry standard) ──
 const calcSupertrend = (candles, period = 10, mult = 3) => {
   if (candles.length < period + 2) return null
   const highs = candles.map(c => parseFloat(c.high))
@@ -244,7 +202,6 @@ const calcSupertrend = (candles, period = 10, mult = 3) => {
   return { trend, value: trend === 1 ? finalLower : finalUpper }
 }
 
-// ── Ichimoku Cloud (standard 9/26/52) ─────────────────────────
 const calcIchimoku = (candles) => {
   if (candles.length < 52) return null
   const highs = candles.map(c => parseFloat(c.high))
@@ -265,17 +222,12 @@ const calcIchimoku = (candles) => {
   }
 }
 
-// ── Fractal 2 (Williams 5-bar fractal, n=2 each side) ─────────
-// Confirmed only — needs 2 candles AFTER the pivot to close, so it
-// never repaints. A confirmed high-fractal = reversal DOWN signal
-// (red arrow above candle). A confirmed low-fractal = reversal UP
-// signal (green arrow below candle).
+// Williams Fractal (n=2). শুধু নিশ্চিত হওয়া পিভট, রিপেইন্ট করে না।
 const calcFractal2 = (candles, n = 2) => {
   if (candles.length < n * 2 + 1) return null
   const highs = candles.map(c => parseFloat(c.high))
   const lows = candles.map(c => parseFloat(c.low))
 
-  // Most recently CONFIRMED pivot index (needs n candles after it)
   const idx = candles.length - 1 - n
   if (idx < n) return null
 
@@ -285,11 +237,8 @@ const calcFractal2 = (candles, n = 2) => {
     if (!(lows[idx] < lows[idx - i] && lows[idx] < lows[idx + i])) isLow = false
   }
 
-  // How many candles ago this fractal confirmed (0 = just confirmed now)
-  const age = candles.length - 1 - (idx + n)
-
-  if (isHigh) return { type: 'high', age }
-  if (isLow) return { type: 'low', age }
+  if (isHigh) return { type: 'high' }
+  if (isLow) return { type: 'low' }
   return null
 }
 
@@ -297,41 +246,48 @@ const calcFractal2 = (candles, n = 2) => {
 //   MASTER SIGNAL ENGINE
 // ══════════════════════════════════════════════════════════
 export const runSignalEngine = (candles) => {
-  const EMPTY = { direction: null, strength: 50, breakdown: {}, confidence: 0 }
+  const EMPTY = { direction: null, strength: 50, breakdown: {}, confidence: 0, bulls: 0, bears: 0 }
   if (!candles || candles.length < MIN_CANDLES) return EMPTY
 
   const closes = candles.map(c => parseFloat(c.close))
   const last = closes[closes.length - 1]
   let score = 0, maxScore = 0
-  const bd = {} // ordered object — insertion order = display order
+  let strongBulls = 0, strongBears = 0
+  const bd = {}
 
-  // ── TOP TIER: ADX → Supertrend → Ichimoku → Fractal 2 ───────
+  // একটি ইন্ডিকেটরের ভোট নথিভুক্ত করে।
+  // শক্ত ভোট = weight-এর কমপক্ষে ৫০%। দুর্বল ভোট স্কোরে যায় (ছোট ওজনে)
+  // কিন্তু কনফিডেন্সে গোনা হয় না, আর স্ক্রিনে "দুর্বল" দেখায়।
+  const vote = (label, v, weight) => {
+    score += v
+    maxScore += weight
+    const strong = Math.abs(v) >= weight * 0.5
+    if (strong) {
+      if (v > 0) strongBulls++
+      else strongBears++
+      bd[label] = v > 0 ? '↑ BULL' : '↓ BEAR'
+    } else {
+      bd[label] = v > 0 ? '↑ দুর্বল' : '↓ দুর্বল'
+    }
+  }
+  const neutral = (label) => { bd[label] = '→ NEUTRAL' }
 
-  // 1. ADX + DI — weight 16 (always directional: weak trend still votes, just with less weight)
+  // 1. ADX + DI — weight 16
   const ax = calcADX(candles, 14)
   if (ax) {
     let v
     if (ax.adx > 25) v = ax.plusDI > ax.minusDI ? 16 : -16
     else if (ax.adx > 20) v = ax.plusDI > ax.minusDI ? 8 : -8
     else v = ax.plusDI > ax.minusDI ? 4 : -4
-    score += v; maxScore += 16
-    bd[`ADX ${ax.adx.toFixed(0)}`] = v > 0 ? '↑ BULL' : '↓ BEAR'
-  } else {
-    bd['ADX'] = '→ NEUTRAL' // only when there isn't enough candle history to compute
-  }
+    vote(`ADX ${ax.adx.toFixed(0)}`, v, 16)
+  } else neutral('ADX')
 
   // 2. Supertrend — weight 16
   const st2 = calcSupertrend(candles, 10, 3)
-  if (st2) {
-    const v = st2.trend === 1 ? 16 : -16
-    score += v; maxScore += 16
-    bd['Supertrend'] = v > 0 ? '↑ BULL' : '↓ BEAR'
-  } else {
-    bd['Supertrend'] = '→ NEUTRAL'
-  }
+  if (st2) vote('Supertrend', st2.trend === 1 ? 16 : -16, 16)
+  else neutral('Supertrend')
 
-  // 3. Ichimoku Cloud — weight 16 (always directional: inside-cloud uses TK-cross,
-  // and a close-vs-kijun tiebreaker on the rare exact TK tie)
+  // 3. Ichimoku — weight 16
   const ich = calcIchimoku(candles)
   if (ich) {
     let v
@@ -339,52 +295,27 @@ export const runSignalEngine = (candles) => {
     else if (ich.belowCloud) v = -16
     else if (ich.tkCross !== 0) v = ich.tkCross * 4
     else v = last >= ich.kijun ? 4 : -4
-    score += v; maxScore += 16
-    bd['Ichimoku'] = v > 0 ? '↑ BULL' : '↓ BEAR'
-  } else {
-    bd['Ichimoku'] = '→ NEUTRAL'
-  }
+    vote('Ichimoku', v, 16)
+  } else neutral('Ichimoku')
 
-  // 4. Fractal 2 — weight 16 (decays with age so old pivots don't dominate).
-  // Fractal 2 is event-based (only fires on a confirmed reversal pivot), so
-  // when there's no fresh confirmed pivot right now we fall back to recent
-  // 3-candle momentum just to keep this row always directional — it's a
-  // fallback reading, not a real fractal signal.
+  // 4. Fractal 2 — ইভেন্ট-ভিত্তিক। পিভট না থাকলে NEUTRAL এবং
+  //    maxScore বাড়ে না (আগে fallback momentum দিয়ে নকল ভোট হতো)
   const fr = calcFractal2(candles, 2)
-  if (fr) {
-    const decay = Math.max(0, 1 - fr.age * 0.15) // full weight at age 0, fades to 0 by age ~6
-    const v = fr.type === 'low' ? 16 * decay : -16 * decay
-    score += v; maxScore += 16
-    bd['Fractal 2'] = fr.type === 'low' ? '↑ BULL (▲ সবুজ)' : '↓ BEAR (▼ লাল)'
-  } else {
-    const isBullMomentum = last > closes[Math.max(0, closes.length - 4)]
-    maxScore += 16
-    bd['Fractal 2'] = isBullMomentum ? '↑ BULL' : '↓ BEAR'
-  }
-
-  // ── LOWER TIER: original 7 indicators ───────────────────────
+  if (fr) vote('Fractal 2', fr.type === 'low' ? 16 : -16, 16)
+  else neutral('Fractal 2')
 
   // 5. EMA 8/21 — weight 14
   const e8 = ema(closes, 8), e21 = ema(closes, 21)
   if (e8 && e21) {
     const gap = Math.abs((e8 - e21) / e21) * 100
     const w = Math.min(14, gap * 250)
-    const v = e8 > e21 ? w : -w
-    score += v; maxScore += 14
-    bd['EMA 8/21'] = v > 0 ? '↑ BULL' : '↓ BEAR'
-  } else {
-    bd['EMA 8/21'] = '→ NEUTRAL'
-  }
+    vote('EMA 8/21', e8 > e21 ? w : -w, 14)
+  } else neutral('EMA 8/21')
 
   // 6. EMA 21/50 — weight 12
   const e50 = ema(closes, 50)
-  if (e21 && e50) {
-    const v = e21 > e50 ? 12 : -12
-    score += v; maxScore += 12
-    bd['EMA 21/50'] = v > 0 ? '↑ BULL' : '↓ BEAR'
-  } else {
-    bd['EMA 21/50'] = '→ NEUTRAL'
-  }
+  if (e21 && e50) vote('EMA 21/50', e21 > e50 ? 12 : -12, 12)
+  else neutral('EMA 21/50')
 
   // 7. RSI — weight 14
   const r = rsi(closes, 14)
@@ -396,16 +327,13 @@ export const runSignalEngine = (candles) => {
     else if (r > 75) v = -14
     else if (r > 65) v = -9
     else if (r > 55) v = -3
-    else v = r >= 50 ? 1 : -1 // 45–55 band: still directional, just very light weight
-    score += v; maxScore += 14
-    bd[`RSI ${r.toFixed(0)}`] = v > 0 ? '↑ BULL' : '↓ BEAR'
-  } else {
-    bd['RSI'] = '→ NEUTRAL'
-  }
+    else v = r >= 50 ? 1 : -1
+    vote(`RSI ${r.toFixed(0)}`, v, 14)
+  } else neutral('RSI')
 
-  // 8. Bollinger Bands — weight 12
+  // 8. Bollinger — weight 12
   const b = bb(closes, 20)
-  if (b) {
+  if (b && b.upper !== b.lower) {
     const pct = (last - b.lower) / (b.upper - b.lower)
     let v
     if (pct < 0.05) v = 12
@@ -414,23 +342,17 @@ export const runSignalEngine = (candles) => {
     else if (pct > 0.95) v = -12
     else if (pct > 0.8) v = -7
     else if (pct > 0.6) v = -3
-    else v = pct >= 0.5 ? 1 : -1 // mid-band: still directional, very light weight
-    score += v; maxScore += 12
-    bd['Bollinger'] = v > 0 ? '↑ BULL' : '↓ BEAR'
-  } else {
-    bd['Bollinger'] = '→ NEUTRAL'
-  }
+    else v = pct >= 0.5 ? 1 : -1
+    vote('Bollinger', v, 12)
+  } else neutral('Bollinger')
 
   // 9. MACD — weight 12
   const m = macdFull(closes)
   if (m) {
     const cv = m.line > m.signal ? 7 : -7
     const hv = m.hist > 0 ? 5 : -5
-    score += cv + hv; maxScore += 12
-    bd['MACD'] = (cv + hv) > 0 ? '↑ BULL' : '↓ BEAR'
-  } else {
-    bd['MACD'] = '→ NEUTRAL'
-  }
+    vote('MACD', cv + hv, 12)
+  } else neutral('MACD')
 
   // 10. Stochastic — weight 10
   const st = stoch(candles, 14)
@@ -440,45 +362,28 @@ export const runSignalEngine = (candles) => {
     else if (st < 35) v = 5
     else if (st > 80) v = -10
     else if (st > 65) v = -5
-    else v = st >= 50 ? 1 : -1 // 35–65 mid-range: still directional, very light weight
-    score += v; maxScore += 10
-    bd[`Stoch ${st.toFixed(0)}`] = v > 0 ? '↑ BULL' : '↓ BEAR'
-  } else {
-    bd['Stoch'] = '→ NEUTRAL'
-  }
+    else v = st >= 50 ? 1 : -1
+    vote(`Stoch ${st.toFixed(0)}`, v, 10)
+  } else neutral('Stoch')
 
-  // 11. Candle Pattern — weight 10
+  // 11. Candle Pattern — weight 10. প্যাটার্ন না থাকলে NEUTRAL, maxScore বাড়ে না
   const pat = patternScore(candles)
-  if (pat !== 0) {
-    const v = pat * 5
-    score += v; maxScore += 10
-    bd['Pattern'] = v > 0 ? '↑ BULL' : '↓ BEAR'
-  } else {
-    // no strong pattern detected — fall back to last candle's own color
-    const lastC = candles[candles.length - 1]
-    const isBullCandle = parseFloat(lastC.close) > parseFloat(lastC.open)
-    maxScore += 10
-    bd['Pattern'] = isBullCandle ? '↑ BULL' : '↓ BEAR'
-  }
+  if (pat !== 0) vote('Pattern', pat * 5, 10)
+  else neutral('Pattern')
 
   // ── Final scoring ────────────────────────────────────────────
-  // NOTE: ATR volatility is intentionally NOT used to hide indicators or
-  // block the breakdown anymore. All 11 indicators always compute and
-  // always display their live BULL/BEAR/NEUTRAL reading, regardless of
-  // volatility. Low volatility simply won't produce a strong enough
-  // strength/confidence combo to cross the CALL/PUT thresholds below —
-  // it is reflected naturally in the numbers, not with a separate
-  // "gate" message that made the app look broken.
   if (maxScore === 0) return EMPTY
   const strength = Math.round(((score / maxScore) + 1) / 2 * 100)
-  const bulls = Object.values(bd).filter(v => v.includes('BULL')).length
-  const bears = Object.values(bd).filter(v => v.includes('BEAR')).length
-  const total = bulls + bears
-  const confidence = total > 0 ? Math.round((Math.max(bulls, bears) / total) * 100) : 0
+
+  // কনফিডেন্স = শুধু শক্ত ভোটের মধ্যে কত % একমত
+  const strongTotal = strongBulls + strongBears
+  const confidence = strongTotal > 0
+    ? Math.round((Math.max(strongBulls, strongBears) / strongTotal) * 100)
+    : 0
 
   let direction = null
-  if (strength >= 65 && confidence >= 70) direction = 'CALL'
-  else if (strength <= 35 && confidence >= 70) direction = 'PUT'
+  if (strength >= 65 && confidence >= 70 && strongBulls >= MIN_STRONG_AGREE) direction = 'CALL'
+  else if (strength <= 35 && confidence >= 70 && strongBears >= MIN_STRONG_AGREE) direction = 'PUT'
 
-  return { direction, strength, breakdown: bd, confidence }
-   }
+  return { direction, strength, breakdown: bd, confidence, bulls: strongBulls, bears: strongBears }
+  }
